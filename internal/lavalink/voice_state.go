@@ -48,6 +48,7 @@ func (s *VoiceStateStore) Clear(guildID string) {
 	s.notifyLocked(guildID)
 }
 
+// WaitForFullState blocks until both Discord voice event fragments for the guild describe the requested channel.
 func (s *VoiceStateStore) WaitForFullState(ctx context.Context, guildID, channelID string) (VoiceState, error) {
 	s.mu.Lock()
 	if state, ok := s.states[guildID]; ok && state.completeFor(channelID) {
@@ -55,6 +56,7 @@ func (s *VoiceStateStore) WaitForFullState(ctx context.Context, guildID, channel
 		return state, nil
 	}
 
+	// Discord splits voice connection data across two gateway events, so callers wait for both halves.
 	waiter := make(chan struct{}, 1)
 	s.waiters[guildID] = append(s.waiters[guildID], waiter)
 	s.mu.Unlock()

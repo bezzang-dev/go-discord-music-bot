@@ -203,6 +203,7 @@ func (c *Client) SessionID() string {
 	return c.sessionID
 }
 
+// LoadTrack normalizes Lavalink's different load result types into a single track the bot can enqueue.
 func (c *Client) LoadTrack(ctx context.Context, identifier string) (Track, error) {
 	endpoint := c.baseURL + "/v4/loadtracks?identifier=" + url.QueryEscape(identifier)
 
@@ -211,6 +212,7 @@ func (c *Client) LoadTrack(ctx context.Context, identifier string) (Track, error
 		return Track{}, err
 	}
 
+	// Lavalink returns different payload shapes for direct tracks, searches, and playlists.
 	switch result.LoadType {
 	case "track":
 		var track Track
@@ -252,6 +254,7 @@ func (c *Client) LoadTrack(ctx context.Context, identifier string) (Track, error
 	}
 }
 
+// UpdateVoiceState forwards Discord voice session details so Lavalink can attach its player to the guild voice connection.
 func (c *Client) UpdateVoiceState(ctx context.Context, guildID string, voice VoiceState) error {
 	request := playerUpdateRequest{
 		Voice: &voice,
@@ -260,6 +263,7 @@ func (c *Client) UpdateVoiceState(ctx context.Context, guildID string, voice Voi
 	return c.updatePlayer(ctx, guildID, request)
 }
 
+// PlayTrack swaps the currently active Lavalink track for the guild.
 func (c *Client) PlayTrack(ctx context.Context, guildID string, track Track) error {
 	request := playerUpdateRequest{
 		Track: &struct {
@@ -272,9 +276,11 @@ func (c *Client) PlayTrack(ctx context.Context, guildID string, track Track) err
 	return c.updatePlayer(ctx, guildID, request)
 }
 
+// StopTrack clears the active Lavalink track without destroying the player session.
 func (c *Client) StopTrack(ctx context.Context, guildID string) error {
 	request := map[string]interface{}{
 		"track": map[string]interface{}{
+			// Lavalink clears the active track when encoded is explicitly set to null.
 			"encoded": nil,
 		},
 	}
@@ -362,6 +368,7 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body inter
 	return nil
 }
 
+// readLoop waits for Lavalink readiness once and then routes later websocket messages to the event handler.
 func (c *Client) readLoop(conn *websocket.Conn, readyCh chan<- error) {
 	readySent := false
 
@@ -382,6 +389,7 @@ func (c *Client) readLoop(conn *websocket.Conn, readyCh chan<- error) {
 			return
 		}
 
+		// The websocket is usable only after Lavalink sends its ready frame with a session ID.
 		if op.Op != "ready" {
 			if readySent {
 				c.handleEvent(message)

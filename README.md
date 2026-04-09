@@ -19,6 +19,24 @@ Lavalink handles Discord voice connectivity and actual audio playback, while the
 - Lavalink YouTube plugin
 - Docker Compose
 
+## Request Flow
+```text
+User
+  -> Discord slash command
+  -> discordgo event
+  -> Go bot handler
+  -> internal/player state update
+  -> internal/lavalink REST / WebSocket call
+  -> Lavalink
+  -> Discord voice channel playback
+
+TrackEndEvent
+  -> internal/lavalink event handler
+  -> Go bot callback
+  -> internal/player next track selection
+  -> Lavalink play request
+```
+
 ## Project Structure
 ```text
 cmd/bot/main.go          # Application entry point
@@ -27,6 +45,9 @@ internal/lavalink        # Lavalink REST / WebSocket client
 internal/player          # Per-guild in-memory queue state
 infra/lavalink           # Local Lavalink runtime config
 ```
+
+## Documents
+- [`docs/project-overview.md`](docs/project-overview.md) for a fuller runtime and package-level reference
 
 ## Prerequisites
 Prepare a root `.env` file with the following values:

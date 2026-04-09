@@ -35,6 +35,7 @@ func NewManager() *Manager {
 	}
 }
 
+// Enqueue starts playback immediately when the guild is idle, otherwise it appends the track to the FIFO queue.
 func (m *Manager) Enqueue(guildID, voiceChannelID string, track lavalink.Track) EnqueueResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -59,6 +60,7 @@ func (m *Manager) Enqueue(guildID, voiceChannelID string, track lavalink.Track) 
 	}
 }
 
+// Snapshot returns a detached view of the guild state for command handlers and message rendering.
 func (m *Manager) Snapshot(guildID string) Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -68,6 +70,7 @@ func (m *Manager) Snapshot(guildID string) Snapshot {
 		return Snapshot{}
 	}
 
+	// Return copies so command handlers can inspect state without mutating shared memory.
 	snapshot := Snapshot{
 		VoiceChannelID: player.voiceChannelID,
 		Queue:          append([]lavalink.Track(nil), player.queue...),
@@ -80,6 +83,7 @@ func (m *Manager) Snapshot(guildID string) Snapshot {
 	return snapshot
 }
 
+// Advance promotes the next queued track, or marks the guild idle when the queue is exhausted.
 func (m *Manager) Advance(guildID string) (*lavalink.Track, string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -94,6 +98,7 @@ func (m *Manager) Advance(guildID string) (*lavalink.Track, string, bool) {
 		return nil, player.voiceChannelID, true
 	}
 
+	// Promote the next queued track into the current slot before returning it to the caller.
 	next := player.queue[0]
 	player.queue = player.queue[1:]
 	nextCopy := next
@@ -102,6 +107,7 @@ func (m *Manager) Advance(guildID string) (*lavalink.Track, string, bool) {
 	return &next, player.voiceChannelID, true
 }
 
+// Stop clears the current track and pending queue while keeping the known voice channel intact.
 func (m *Manager) Stop(guildID string) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -116,6 +122,7 @@ func (m *Manager) Stop(guildID string) (string, bool) {
 	return player.voiceChannelID, true
 }
 
+// Leave removes all guild playback state because the bot is expected to disconnect from voice entirely.
 func (m *Manager) Leave(guildID string) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

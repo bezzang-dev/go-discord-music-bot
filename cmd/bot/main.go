@@ -52,6 +52,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Startup assumes Lavalink is available, so fail fast before opening Discord.
 	version, err := lavalinkClient.Version(ctx)
 	if err != nil {
 		log.Fatalf("failed to connect to Lavalink at %s: %v", cfg.LavalinkAddress(), err)
@@ -139,6 +140,8 @@ func main() {
 			Description: "Disconnect from the active voice channel",
 		},
 	}
+
+	// Guild-scoped commands keep local development fast and avoid global propagation delays.
 	createdCommands := make([]*discordgo.ApplicationCommand, 0, len(commands))
 	for _, command := range commands {
 		createdCommand, err := session.ApplicationCommandCreate(
@@ -181,6 +184,7 @@ func (b *bot) onVoiceStateUpdate(s *discordgo.Session, update *discordgo.VoiceSt
 	if s.State == nil || s.State.User == nil {
 		return
 	}
+	// Lavalink only needs the bot's own Discord voice session details.
 	if update.UserID != s.State.User.ID {
 		return
 	}
@@ -204,6 +208,7 @@ func (b *bot) onLavalinkEvent(event lavalink.Event) {
 
 	switch event.Type {
 	case "TrackEndEvent":
+		// Only terminal endings should pull from the queue. User-driven skips/stops are handled elsewhere.
 		reason := strings.ToLower(event.Reason)
 		if reason != "finished" && reason != "loadfailed" {
 			return
@@ -248,6 +253,7 @@ func (b *bot) onInteractionCreate(s *discordgo.Session, i *discordgo.Interaction
 	}
 }
 
+// handlePlay joins the caller's voice channel if needed, resolves a track, and either starts playback or queues it.
 func (b *bot) handlePlay(i *discordgo.InteractionCreate) {
 	if !b.deferInteraction(i) {
 		return
@@ -305,6 +311,7 @@ func (b *bot) handlePlay(i *discordgo.InteractionCreate) {
 	b.editInteraction(i, message)
 }
 
+// handleSkip advances the guild queue and keeps Lavalink in sync with the next playback state.
 func (b *bot) handleSkip(i *discordgo.InteractionCreate) {
 	if !b.deferInteraction(i) {
 		return
@@ -345,6 +352,7 @@ func (b *bot) handleSkip(i *discordgo.InteractionCreate) {
 	b.editInteraction(i, message)
 }
 
+// handleStop clears the in-memory queue first, then stops the Lavalink player for the guild.
 func (b *bot) handleStop(i *discordgo.InteractionCreate) {
 	if !b.deferInteraction(i) {
 		return
@@ -418,6 +426,7 @@ func (b *bot) handleNowPlaying(i *discordgo.InteractionCreate) {
 	b.respondImmediate(i, message)
 }
 
+// handleLeave tears down both the local guild state and the remote Lavalink player before disconnecting from Discord voice.
 func (b *bot) handleLeave(i *discordgo.InteractionCreate) {
 	if !b.deferInteraction(i) {
 		return
@@ -487,6 +496,7 @@ func (b *bot) editInteraction(i *discordgo.InteractionCreate, content string) {
 	}
 }
 
+// ensureVoiceConnection makes sure Discord has acknowledged the voice join and forwards the complete state to Lavalink.
 func (b *bot) ensureVoiceConnection(ctx context.Context, guildID, channelID string) error {
 	snapshot := b.players.Snapshot(guildID)
 	if snapshot.VoiceChannelID == "" {
@@ -495,6 +505,7 @@ func (b *bot) ensureVoiceConnection(ctx context.Context, guildID, channelID stri
 		}
 	}
 
+	// Discord sends voice state and voice server updates separately; Lavalink needs the merged result.
 	voiceState, err := b.voiceState.WaitForFullState(ctx, guildID, channelID)
 	if err != nil {
 		return fmt.Errorf("timed out while waiting for Lavalink voice state: %w", err)
@@ -542,6 +553,7 @@ func normalizeTrackIdentifier(query string) string {
 		return query
 	}
 
+	// Non-URL input is treated as a YouTube search handled by the Lavalink plugin.
 	return "ytsearch:" + query
 }
 
