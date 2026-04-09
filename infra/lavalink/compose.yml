@@ -1,0 +1,14 @@
+services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    container_name: hnmo-lavalink
+    restart: unless-stopped
+    environment:
+      _JAVA_OPTIONS: -Xmx1G
+      SERVER_PORT: 2333
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:-dev-lavalink-pass}
+    volumes:
+      - ./application.yml:/opt/Lavalink/application.yml:ro
+      - ./plugins:/opt/Lavalink/plugins
+    ports:
+      - "127.0.0.1:2333:2333"
