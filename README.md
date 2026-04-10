@@ -47,7 +47,10 @@ infra/lavalink           # Local Lavalink runtime config
 ```
 
 ## Documents
-- [`docs/project-overview.md`](docs/project-overview.md) for a fuller runtime and package-level reference
+- English overview: [`docs/project-overview.en.md`](docs/project-overview.en.md)
+- English Lavalink guide: [`docs/lavalink-local.en.md`](docs/lavalink-local.en.md)
+- Korean overview: [`docs/project-overview.md`](docs/project-overview.md)
+- Korean Lavalink guide: [`docs/lavalink-local.md`](docs/lavalink-local.md)
 
 ## Prerequisites
 Prepare a root `.env` file with the following values:
