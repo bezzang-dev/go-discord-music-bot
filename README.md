@@ -42,15 +42,19 @@ TrackEndEvent
 cmd/bot/main.go          # Application entry point
 internal/config          # Environment loading and validation
 internal/lavalink        # Lavalink REST / WebSocket client
+internal/observability   # Prometheus metrics recorder and HTTP server
 internal/player          # Per-guild in-memory queue state
 infra/lavalink           # Local Lavalink runtime config
+infra/observability      # Local Prometheus / Grafana runtime config
 ```
 
 ## Documents
 - English overview: [`docs/project-overview.en.md`](docs/project-overview.en.md)
 - English Lavalink guide: [`docs/lavalink-local.en.md`](docs/lavalink-local.en.md)
+- English observability guide: [`docs/observability-local.en.md`](docs/observability-local.en.md)
 - Korean overview: [`docs/project-overview.md`](docs/project-overview.md)
 - Korean Lavalink guide: [`docs/lavalink-local.md`](docs/lavalink-local.md)
+- Korean observability guide: [`docs/observability-local.md`](docs/observability-local.md)
 
 ## Prerequisites
 Prepare a root `.env` file with the following values:
@@ -62,6 +66,9 @@ LAVALINK_HOST=127.0.0.1
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=dev-lavalink-pass
 LOG_LEVEL=info
+METRICS_ENABLED=true
+METRICS_ADDR=127.0.0.1:2112
+METRICS_LAVALINK_STATS_INTERVAL=15s
 ```
 
 `.env` is not committed.
@@ -93,7 +100,44 @@ Expected startup logs:
 - `connected to Lavalink 4.2.2`
 - `logged in as ...`
 - `Lavalink websocket session ... is ready`
+- `metrics server is listening on 127.0.0.1:2112`
 - `bot is running. press Ctrl+C to exit.`
+
+## Observability
+The bot exposes Prometheus metrics at `http://127.0.0.1:2112/metrics` by default.
+
+Check the metrics endpoint while the bot is running:
+
+```bash
+curl -sS http://127.0.0.1:2112/metrics
+```
+
+Start the local Prometheus and Grafana stack:
+
+```bash
+docker compose -f infra/observability/compose.yml up -d
+```
+
+Prometheus targets:
+
+```text
+http://127.0.0.1:9090/targets
+```
+
+Grafana:
+
+```text
+http://127.0.0.1:3000
+```
+
+The local Grafana credentials are `admin / admin`.
+Open the `HNMO / HNMO Discord Bot` dashboard after logging in.
+
+If Prometheus cannot reach the bot metrics endpoint on Linux, run the bot with:
+
+```env
+METRICS_ADDR=0.0.0.0:2112
+```
 
 ## Manual Verification
 In your Discord test server, verify the bot in this order:
