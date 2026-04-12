@@ -5,17 +5,25 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const defaultLogLevel = "info"
+const (
+	defaultLogLevel                     = "info"
+	defaultMetricsAddr                  = "127.0.0.1:2112"
+	defaultMetricsLavalinkStatsInterval = 15 * time.Second
+)
 
 type Config struct {
-	DiscordToken     string
-	GuildID          string
-	LavalinkHost     string
-	LavalinkPort     int
-	LavalinkPassword string
-	LogLevel         string
+	DiscordToken                 string
+	GuildID                      string
+	LavalinkHost                 string
+	LavalinkPort                 int
+	LavalinkPassword             string
+	LogLevel                     string
+	MetricsEnabled               bool
+	MetricsAddr                  string
+	MetricsLavalinkStatsInterval time.Duration
 }
 
 func Load() (Config, error) {
@@ -25,11 +33,18 @@ func Load() (Config, error) {
 		LavalinkHost:     strings.TrimSpace(os.Getenv("LAVALINK_HOST")),
 		LavalinkPassword: strings.TrimSpace(os.Getenv("LAVALINK_PASSWORD")),
 		LogLevel:         strings.TrimSpace(os.Getenv("LOG_LEVEL")),
+		MetricsEnabled:   true,
+		MetricsAddr:      strings.TrimSpace(os.Getenv("METRICS_ADDR")),
 	}
 
 	portValue := strings.TrimSpace(os.Getenv("LAVALINK_PORT"))
+	metricsEnabledValue := strings.TrimSpace(os.Getenv("METRICS_ENABLED"))
+	metricsStatsIntervalValue := strings.TrimSpace(os.Getenv("METRICS_LAVALINK_STATS_INTERVAL"))
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = defaultLogLevel
+	}
+	if cfg.MetricsAddr == "" {
+		cfg.MetricsAddr = defaultMetricsAddr
 	}
 
 	var missing []string
@@ -61,6 +76,28 @@ func Load() (Config, error) {
 	}
 
 	cfg.LavalinkPort = port
+
+	if metricsEnabledValue != "" {
+		enabled, err := strconv.ParseBool(metricsEnabledValue)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid METRICS_ENABLED %q: %w", metricsEnabledValue, err)
+		}
+		cfg.MetricsEnabled = enabled
+	}
+
+	if metricsStatsIntervalValue == "" {
+		cfg.MetricsLavalinkStatsInterval = defaultMetricsLavalinkStatsInterval
+	} else {
+		interval, err := time.ParseDuration(metricsStatsIntervalValue)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid METRICS_LAVALINK_STATS_INTERVAL %q: %w", metricsStatsIntervalValue, err)
+		}
+		if interval <= 0 {
+			return Config{}, fmt.Errorf("invalid METRICS_LAVALINK_STATS_INTERVAL %q: must be greater than zero", metricsStatsIntervalValue)
+		}
+		cfg.MetricsLavalinkStatsInterval = interval
+	}
+
 	return cfg, nil
 }
 

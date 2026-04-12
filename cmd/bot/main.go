@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"os/signal"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/bezzang-dev/go-discord-music-bot/internal/config"
 	"github.com/bezzang-dev/go-discord-music-bot/internal/lavalink"
+	"github.com/bezzang-dev/go-discord-music-bot/internal/observability"
 	"github.com/bezzang-dev/go-discord-music-bot/internal/player"
 )
 
@@ -33,21 +33,38 @@ type bot struct {
 	cfg          config.Config
 	discord      *discordgo.Session
 	lavalink     *lavalink.Client
+	metrics      *observability.Recorder
 	voiceState   *lavalink.VoiceStateStore
 	players      *player.Manager
+	leaveMu      sync.Mutex
+	leavingGuild map[string]struct{}
+	botUserMu    sync.RWMutex
+	botUserCache map[string]bool
 	readyOnce    sync.Once
 	discordReady chan struct{}
 }
 
 func main() {
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	playerManager := player.NewManager()
 	lavalinkClient := lavalink.NewClient(cfg.LavalinkURL(), cfg.LavalinkPassword, &http.Client{
 		Timeout: 5 * time.Second,
 	})
+	metrics := observability.NewRecorder(playerManager, lavalinkClient)
+	if cfg.MetricsEnabled {
+		if err := observability.StartServer(rootCtx, cfg.MetricsAddr, metrics.Handler()); err != nil {
+			log.Fatalf("failed to start metrics server: %v", err)
+		}
+		metrics.StartLavalinkStatsPolling(rootCtx, lavalinkClient, cfg.MetricsLavalinkStatsInterval)
+		log.Printf("metrics server is listening on %s", cfg.MetricsAddr)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -68,8 +85,11 @@ func main() {
 		cfg:          cfg,
 		discord:      session,
 		lavalink:     lavalinkClient,
+		metrics:      metrics,
 		voiceState:   lavalink.NewVoiceStateStore(),
-		players:      player.NewManager(),
+		players:      playerManager,
+		leavingGuild: make(map[string]struct{}),
+		botUserCache: make(map[string]bool),
 		discordReady: make(chan struct{}),
 	}
 	app.lavalink.SetEventHandler(app.onLavalinkEvent)
@@ -95,7 +115,9 @@ func main() {
 	if err := app.lavalink.Connect(wsCtx, session.State.User.ID); err != nil {
 		log.Fatalf("failed to establish Lavalink websocket session: %v", err)
 	}
+	app.metrics.SetLavalinkConnected(true)
 	defer func() {
+		app.metrics.SetLavalinkConnected(false)
 		if err := app.lavalink.Close(); err != nil {
 			log.Printf("failed to close lavalink websocket: %v", err)
 		}
@@ -166,15 +188,16 @@ func main() {
 
 	log.Println("bot is running. press Ctrl+C to exit.")
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-rootCtx.Done()
 
 	log.Println("shutting down bot")
 }
 
 func (b *bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	log.Printf("logged in as %s#%s", r.User.Username, r.User.Discriminator)
+	if b.metrics != nil {
+		b.metrics.SetDiscordReady(len(r.Guilds))
+	}
 	b.readyOnce.Do(func() {
 		close(b.discordReady)
 	})
@@ -185,16 +208,18 @@ func (b *bot) onVoiceStateUpdate(s *discordgo.Session, update *discordgo.VoiceSt
 		return
 	}
 	// Lavalink only needs the bot's own Discord voice session details.
-	if update.UserID != s.State.User.ID {
+	if update.UserID == s.State.User.ID {
+		if update.ChannelID == "" {
+			b.voiceState.Clear(update.GuildID)
+			b.players.SetVoiceChannel(update.GuildID, "")
+		} else {
+			b.voiceState.UpdateVoiceState(update.GuildID, update.SessionID, update.ChannelID)
+			b.players.SetVoiceChannel(update.GuildID, update.ChannelID)
+		}
 		return
 	}
-	if update.ChannelID == "" {
-		b.voiceState.Clear(update.GuildID)
-		b.players.SetVoiceChannel(update.GuildID, "")
-		return
-	}
-	b.voiceState.UpdateVoiceState(update.GuildID, update.SessionID, update.ChannelID)
-	b.players.SetVoiceChannel(update.GuildID, update.ChannelID)
+
+	b.maybeAutoLeaveEmptyChannel(update)
 }
 
 func (b *bot) onVoiceServerUpdate(s *discordgo.Session, update *discordgo.VoiceServerUpdate) {
@@ -204,6 +229,9 @@ func (b *bot) onVoiceServerUpdate(s *discordgo.Session, update *discordgo.VoiceS
 func (b *bot) onLavalinkEvent(event lavalink.Event) {
 	if event.Op != "event" {
 		return
+	}
+	if b.metrics != nil {
+		b.metrics.RecordLavalinkEvent(event.Type, event.Reason)
 	}
 
 	switch event.Type {
@@ -235,46 +263,59 @@ func (b *bot) onInteractionCreate(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
-	switch i.ApplicationCommandData().Name {
+	startedAt := time.Now()
+	commandName := i.ApplicationCommandData().Name
+	outcome := observability.OutcomeNoop
+	defer func() {
+		if b.metrics != nil {
+			b.metrics.RecordCommand(commandName, outcome, time.Since(startedAt))
+		}
+	}()
+
+	switch commandName {
 	case "ping":
-		b.respondImmediate(i, "pong")
+		if b.respondImmediate(i, "pong") {
+			outcome = observability.OutcomeSuccess
+		} else {
+			outcome = observability.OutcomeDependencyError
+		}
 	case playCommandName:
-		b.handlePlay(i)
+		outcome = b.handlePlay(i)
 	case skipCommandName:
-		b.handleSkip(i)
+		outcome = b.handleSkip(i)
 	case stopCommandName:
-		b.handleStop(i)
+		outcome = b.handleStop(i)
 	case queueCommandName:
-		b.handleQueue(i)
+		outcome = b.handleQueue(i)
 	case nowPlayingCommandName:
-		b.handleNowPlaying(i)
+		outcome = b.handleNowPlaying(i)
 	case leaveCommandName:
-		b.handleLeave(i)
+		outcome = b.handleLeave(i)
 	}
 }
 
 // handlePlay joins the caller's voice channel if needed, resolves a track, and either starts playback or queues it.
-func (b *bot) handlePlay(i *discordgo.InteractionCreate) {
+func (b *bot) handlePlay(i *discordgo.InteractionCreate) string {
 	if !b.deferInteraction(i) {
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	query := strings.TrimSpace(i.ApplicationCommandData().Options[0].StringValue())
 	if query == "" {
 		b.editInteraction(i, "query is required")
-		return
+		return observability.OutcomeUserError
 	}
 
 	channelID, err := findUserVoiceChannel(b.discord, i.GuildID, i.Member.User.ID)
 	if err != nil {
 		b.editInteraction(i, err.Error())
-		return
+		return observability.OutcomeUserError
 	}
 
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.VoiceChannelID != "" && snapshot.VoiceChannelID != channelID {
 		b.editInteraction(i, "bot is already active in another voice channel")
-		return
+		return observability.OutcomeUserError
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -283,14 +324,14 @@ func (b *bot) handlePlay(i *discordgo.InteractionCreate) {
 	if err := b.ensureVoiceConnection(ctx, i.GuildID, channelID); err != nil {
 		b.editInteraction(i, err.Error())
 		log.Printf("failed to prepare voice connection for guild %s: %v", i.GuildID, err)
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	track, err := b.lavalink.LoadTrack(ctx, normalizeTrackIdentifier(query))
 	if err != nil {
 		b.editInteraction(i, fmt.Sprintf("failed to load track: %v", err))
 		log.Printf("failed to load track for guild %s query %q: %v", i.GuildID, query, err)
-		return
+		return trackLoadOutcome(err)
 	}
 
 	result := b.players.Enqueue(i.GuildID, channelID, track)
@@ -299,33 +340,34 @@ func (b *bot) handlePlay(i *discordgo.InteractionCreate) {
 			b.players.ClearCurrent(i.GuildID)
 			b.editInteraction(i, "failed to start playback in Lavalink")
 			log.Printf("failed to play track for guild %s: %v", i.GuildID, err)
-			return
+			return observability.OutcomeDependencyError
 		}
 
 		message := fmt.Sprintf("Now playing: **%s** by **%s**", track.Info.Title, track.Info.Author)
 		b.editInteraction(i, message)
-		return
+		return observability.OutcomeSuccess
 	}
 
 	message := fmt.Sprintf("Queued #%d: **%s** by **%s**", result.QueuePosition, track.Info.Title, track.Info.Author)
 	b.editInteraction(i, message)
+	return observability.OutcomeSuccess
 }
 
 // handleSkip advances the guild queue and keeps Lavalink in sync with the next playback state.
-func (b *bot) handleSkip(i *discordgo.InteractionCreate) {
+func (b *bot) handleSkip(i *discordgo.InteractionCreate) string {
 	if !b.deferInteraction(i) {
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.Current == nil {
 		b.editInteraction(i, "there is no track to skip")
-		return
+		return observability.OutcomeNoop
 	}
 
 	if err := b.requireUserInActiveChannel(i, snapshot.VoiceChannelID); err != nil {
 		b.editInteraction(i, err.Error())
-		return
+		return observability.OutcomeUserError
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -336,37 +378,38 @@ func (b *bot) handleSkip(i *discordgo.InteractionCreate) {
 		if err := b.lavalink.StopTrack(ctx, i.GuildID); err != nil {
 			b.editInteraction(i, "failed to stop playback in Lavalink")
 			log.Printf("failed to stop playback for guild %s: %v", i.GuildID, err)
-			return
+			return observability.OutcomeDependencyError
 		}
 		b.editInteraction(i, "Skipped the current track. Queue is now empty.")
-		return
+		return observability.OutcomeSuccess
 	}
 
 	if err := b.lavalink.PlayTrack(ctx, i.GuildID, *next); err != nil {
 		b.editInteraction(i, "failed to play the next track")
 		log.Printf("failed to skip to next track for guild %s: %v", i.GuildID, err)
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	message := fmt.Sprintf("Skipped. Now playing: **%s** by **%s**", next.Info.Title, next.Info.Author)
 	b.editInteraction(i, message)
+	return observability.OutcomeSuccess
 }
 
 // handleStop clears the in-memory queue first, then stops the Lavalink player for the guild.
-func (b *bot) handleStop(i *discordgo.InteractionCreate) {
+func (b *bot) handleStop(i *discordgo.InteractionCreate) string {
 	if !b.deferInteraction(i) {
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.Current == nil && len(snapshot.Queue) == 0 {
 		b.editInteraction(i, "there is no active queue to stop")
-		return
+		return observability.OutcomeNoop
 	}
 
 	if err := b.requireUserInActiveChannel(i, snapshot.VoiceChannelID); err != nil {
 		b.editInteraction(i, err.Error())
-		return
+		return observability.OutcomeUserError
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -374,23 +417,26 @@ func (b *bot) handleStop(i *discordgo.InteractionCreate) {
 
 	if _, ok := b.players.Stop(i.GuildID); !ok {
 		b.editInteraction(i, "there is no active queue to stop")
-		return
+		return observability.OutcomeNoop
 	}
 
 	if err := b.lavalink.StopTrack(ctx, i.GuildID); err != nil {
 		b.editInteraction(i, "failed to stop playback in Lavalink")
 		log.Printf("failed to stop playback for guild %s: %v", i.GuildID, err)
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	b.editInteraction(i, fmt.Sprintf("Stopped playback and cleared %d queued track(s).", len(snapshot.Queue)))
+	return observability.OutcomeSuccess
 }
 
-func (b *bot) handleQueue(i *discordgo.InteractionCreate) {
+func (b *bot) handleQueue(i *discordgo.InteractionCreate) string {
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.Current == nil && len(snapshot.Queue) == 0 {
-		b.respondImmediate(i, "queue is empty")
-		return
+		if !b.respondImmediate(i, "queue is empty") {
+			return observability.OutcomeDependencyError
+		}
+		return observability.OutcomeNoop
 	}
 
 	var lines []string
@@ -412,56 +458,56 @@ func (b *bot) handleQueue(i *discordgo.InteractionCreate) {
 		}
 	}
 
-	b.respondImmediate(i, strings.Join(lines, "\n"))
+	if !b.respondImmediate(i, strings.Join(lines, "\n")) {
+		return observability.OutcomeDependencyError
+	}
+	return observability.OutcomeSuccess
 }
 
-func (b *bot) handleNowPlaying(i *discordgo.InteractionCreate) {
+func (b *bot) handleNowPlaying(i *discordgo.InteractionCreate) string {
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.Current == nil {
-		b.respondImmediate(i, "nothing is playing right now")
-		return
+		if !b.respondImmediate(i, "nothing is playing right now") {
+			return observability.OutcomeDependencyError
+		}
+		return observability.OutcomeNoop
 	}
 
 	message := fmt.Sprintf("Now playing: **%s** by **%s** (%s)", snapshot.Current.Info.Title, snapshot.Current.Info.Author, formatDuration(snapshot.Current.Info.Length))
-	b.respondImmediate(i, message)
+	if !b.respondImmediate(i, message) {
+		return observability.OutcomeDependencyError
+	}
+	return observability.OutcomeSuccess
 }
 
 // handleLeave tears down both the local guild state and the remote Lavalink player before disconnecting from Discord voice.
-func (b *bot) handleLeave(i *discordgo.InteractionCreate) {
+func (b *bot) handleLeave(i *discordgo.InteractionCreate) string {
 	if !b.deferInteraction(i) {
-		return
+		return observability.OutcomeDependencyError
 	}
 
 	snapshot := b.players.Snapshot(i.GuildID)
 	if snapshot.VoiceChannelID == "" {
 		b.editInteraction(i, "bot is not connected to a voice channel")
-		return
+		return observability.OutcomeNoop
 	}
 
 	if err := b.requireUserInActiveChannel(i, snapshot.VoiceChannelID); err != nil {
 		b.editInteraction(i, err.Error())
-		return
+		return observability.OutcomeUserError
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	b.players.Leave(i.GuildID)
-	b.voiceState.Clear(i.GuildID)
-
-	if err := b.lavalink.DestroyPlayer(ctx, i.GuildID); err != nil {
+	if err := b.leaveGuildVoice(ctx, i.GuildID); err != nil {
 		b.editInteraction(i, "failed to destroy the Lavalink player")
-		log.Printf("failed to destroy player for guild %s: %v", i.GuildID, err)
-		return
-	}
-
-	if err := b.discord.ChannelVoiceJoinManual(i.GuildID, "", false, true); err != nil {
-		b.editInteraction(i, "failed to disconnect from the voice channel")
-		log.Printf("failed to send voice disconnect for guild %s: %v", i.GuildID, err)
-		return
+		log.Printf("failed to leave voice channel for guild %s: %v", i.GuildID, err)
+		return observability.OutcomeDependencyError
 	}
 
 	b.editInteraction(i, "Disconnected from the voice channel and cleared the queue.")
+	return observability.OutcomeSuccess
 }
 
 func (b *bot) deferInteraction(i *discordgo.InteractionCreate) bool {
@@ -475,7 +521,7 @@ func (b *bot) deferInteraction(i *discordgo.InteractionCreate) bool {
 	return true
 }
 
-func (b *bot) respondImmediate(i *discordgo.InteractionCreate, content string) {
+func (b *bot) respondImmediate(i *discordgo.InteractionCreate, content string) bool {
 	err := b.discord.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -484,7 +530,9 @@ func (b *bot) respondImmediate(i *discordgo.InteractionCreate, content string) {
 	})
 	if err != nil {
 		log.Printf("failed to respond to interaction: %v", err)
+		return false
 	}
+	return true
 }
 
 func (b *bot) editInteraction(i *discordgo.InteractionCreate, content string) {
@@ -517,6 +565,124 @@ func (b *bot) ensureVoiceConnection(ctx context.Context, guildID, channelID stri
 
 	b.players.SetVoiceChannel(guildID, channelID)
 	return nil
+}
+
+func (b *bot) maybeAutoLeaveEmptyChannel(update *discordgo.VoiceStateUpdate) {
+	snapshot := b.players.Snapshot(update.GuildID)
+	if snapshot.VoiceChannelID == "" {
+		return
+	}
+	if !voiceStateTouchesChannel(update, snapshot.VoiceChannelID) {
+		return
+	}
+
+	humanUsers, ok := b.humanUsersInChannel(update.GuildID, snapshot.VoiceChannelID)
+	if !ok || humanUsers > 0 {
+		return
+	}
+
+	log.Printf("auto leaving guild %s because voice channel %s has no human users", update.GuildID, snapshot.VoiceChannelID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := b.leaveGuildVoice(ctx, update.GuildID); err != nil {
+		log.Printf("failed to auto leave guild %s: %v", update.GuildID, err)
+	}
+
+	if _, err := b.discord.ChannelMessageSend(snapshot.VoiceChannelID, "Leaving because the voice channel is empty."); err != nil {
+		log.Printf("failed to send auto leave message for guild %s: %v", update.GuildID, err)
+	}
+}
+
+func (b *bot) leaveGuildVoice(ctx context.Context, guildID string) error {
+	if !b.beginGuildLeave(guildID) {
+		return nil
+	}
+	defer b.finishGuildLeave(guildID)
+
+	b.players.Leave(guildID)
+	b.voiceState.Clear(guildID)
+
+	if err := b.lavalink.DestroyPlayer(ctx, guildID); err != nil {
+		return fmt.Errorf("destroy lavalink player: %w", err)
+	}
+
+	if err := b.discord.ChannelVoiceJoinManual(guildID, "", false, true); err != nil {
+		return fmt.Errorf("disconnect from voice channel: %w", err)
+	}
+
+	return nil
+}
+
+func (b *bot) beginGuildLeave(guildID string) bool {
+	b.leaveMu.Lock()
+	defer b.leaveMu.Unlock()
+
+	if _, exists := b.leavingGuild[guildID]; exists {
+		return false
+	}
+
+	b.leavingGuild[guildID] = struct{}{}
+	return true
+}
+
+func (b *bot) finishGuildLeave(guildID string) {
+	b.leaveMu.Lock()
+	defer b.leaveMu.Unlock()
+
+	delete(b.leavingGuild, guildID)
+}
+
+func (b *bot) humanUsersInChannel(guildID, channelID string) (int, bool) {
+	guild, err := b.discord.State.Guild(guildID)
+	if err != nil {
+		log.Printf("failed to inspect guild state for guild %s: %v", guildID, err)
+		return 0, false
+	}
+
+	return countHumanUsersInChannel(guild.VoiceStates, channelID, b.discord.State.User.ID, func(voiceState *discordgo.VoiceState) bool {
+		return b.isBotUser(voiceState)
+	}), true
+}
+
+func (b *bot) isBotUser(voiceState *discordgo.VoiceState) bool {
+	if voiceState == nil || voiceState.UserID == "" {
+		return false
+	}
+
+	if voiceState.Member != nil && voiceState.Member.User != nil {
+		b.cacheBotUser(voiceState.UserID, voiceState.Member.User.Bot)
+		return voiceState.Member.User.Bot
+	}
+
+	if cached, ok := b.cachedBotUser(voiceState.UserID); ok {
+		return cached
+	}
+
+	user, err := b.discord.User(voiceState.UserID)
+	if err != nil {
+		log.Printf("failed to inspect user %s bot status: %v", voiceState.UserID, err)
+		return false
+	}
+
+	b.cacheBotUser(voiceState.UserID, user.Bot)
+	return user.Bot
+}
+
+func (b *bot) cachedBotUser(userID string) (bool, bool) {
+	b.botUserMu.RLock()
+	defer b.botUserMu.RUnlock()
+
+	isBot, ok := b.botUserCache[userID]
+	return isBot, ok
+}
+
+func (b *bot) cacheBotUser(userID string, isBot bool) {
+	b.botUserMu.Lock()
+	defer b.botUserMu.Unlock()
+
+	b.botUserCache[userID] = isBot
 }
 
 func (b *bot) requireUserInActiveChannel(i *discordgo.InteractionCreate, activeChannelID string) error {
@@ -557,6 +723,18 @@ func normalizeTrackIdentifier(query string) string {
 	return "ytsearch:" + query
 }
 
+func trackLoadOutcome(err error) string {
+	if err == nil {
+		return observability.OutcomeSuccess
+	}
+
+	message := err.Error()
+	if strings.Contains(message, "no matches found") || strings.Contains(message, "empty search result") {
+		return observability.OutcomeUserError
+	}
+	return observability.OutcomeDependencyError
+}
+
 func formatDuration(milliseconds int64) string {
 	if milliseconds <= 0 {
 		return "live"
@@ -571,4 +749,32 @@ func formatDuration(milliseconds int64) string {
 		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 	}
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
+}
+
+func voiceStateTouchesChannel(update *discordgo.VoiceStateUpdate, channelID string) bool {
+	if update == nil || channelID == "" {
+		return false
+	}
+	if update.ChannelID == channelID {
+		return true
+	}
+	return update.BeforeUpdate != nil && update.BeforeUpdate.ChannelID == channelID
+}
+
+func countHumanUsersInChannel(voiceStates []*discordgo.VoiceState, channelID, botUserID string, isBot func(*discordgo.VoiceState) bool) int {
+	humanUsers := 0
+	for _, voiceState := range voiceStates {
+		if voiceState == nil || voiceState.ChannelID != channelID {
+			continue
+		}
+		if voiceState.UserID == "" || voiceState.UserID == botUserID {
+			continue
+		}
+		if isBot(voiceState) {
+			continue
+		}
+		humanUsers++
+	}
+
+	return humanUsers
 }

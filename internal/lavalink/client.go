@@ -85,6 +85,27 @@ type Event struct {
 	Reason  string `json:"reason"`
 }
 
+type Stats struct {
+	Players        int         `json:"players"`
+	PlayingPlayers int         `json:"playingPlayers"`
+	Uptime         int64       `json:"uptime"`
+	Memory         StatsMemory `json:"memory"`
+	CPU            StatsCPU    `json:"cpu"`
+}
+
+type StatsMemory struct {
+	Free       int64 `json:"free"`
+	Used       int64 `json:"used"`
+	Allocated  int64 `json:"allocated"`
+	Reservable int64 `json:"reservable"`
+}
+
+type StatsCPU struct {
+	Cores        int     `json:"cores"`
+	SystemLoad   float64 `json:"systemLoad"`
+	LavalinkLoad float64 `json:"lavalinkLoad"`
+}
+
 type playerUpdateRequest struct {
 	Track *struct {
 		Encoded string `json:"encoded,omitempty"`
@@ -167,9 +188,6 @@ func (c *Client) Connect(ctx context.Context, userID string) error {
 			_ = conn.Close()
 			return err
 		}
-		c.mu.Lock()
-		c.wsConn = conn
-		c.mu.Unlock()
 		return nil
 	case <-ctx.Done():
 		_ = conn.Close()
@@ -201,6 +219,12 @@ func (c *Client) SessionID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.sessionID
+}
+
+func (c *Client) Connected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.wsConn != nil && c.sessionID != ""
 }
 
 // LoadTrack normalizes Lavalink's different load result types into a single track the bot can enqueue.
@@ -252,6 +276,16 @@ func (c *Client) LoadTrack(ctx context.Context, identifier string) (Track, error
 	default:
 		return Track{}, fmt.Errorf("unsupported lavalink load type %q", result.LoadType)
 	}
+}
+
+func (c *Client) Stats(ctx context.Context) (Stats, error) {
+	var stats Stats
+	endpoint := c.baseURL + "/v4/stats"
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &stats); err != nil {
+		return Stats{}, fmt.Errorf("request lavalink stats: %w", err)
+	}
+
+	return stats, nil
 }
 
 // UpdateVoiceState forwards Discord voice session details so Lavalink can attach its player to the guild voice connection.
@@ -371,6 +405,11 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body inter
 // readLoop waits for Lavalink readiness once and then routes later websocket messages to the event handler.
 func (c *Client) readLoop(conn *websocket.Conn, readyCh chan<- error) {
 	readySent := false
+	defer func() {
+		if readySent {
+			c.clearConnection(conn)
+		}
+	}()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -407,6 +446,7 @@ func (c *Client) readLoop(conn *websocket.Conn, readyCh chan<- error) {
 
 		c.mu.Lock()
 		c.sessionID = ready.SessionID
+		c.wsConn = conn
 		c.mu.Unlock()
 
 		if !readySent {
@@ -414,6 +454,17 @@ func (c *Client) readLoop(conn *websocket.Conn, readyCh chan<- error) {
 			readySent = true
 		}
 	}
+}
+
+func (c *Client) clearConnection(conn *websocket.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.wsConn != conn {
+		return
+	}
+	c.wsConn = nil
+	c.sessionID = ""
 }
 
 func (c *Client) handleEvent(message []byte) {

@@ -12,6 +12,13 @@ type Snapshot struct {
 	Queue          []lavalink.Track
 }
 
+type Summary struct {
+	KnownGuilds       int
+	ActiveVoiceGuilds int
+	PlayingGuilds     int
+	QueuedTracks      int
+}
+
 type EnqueueResult struct {
 	Started       bool
 	QueuePosition int
@@ -81,6 +88,27 @@ func (m *Manager) Snapshot(guildID string) Snapshot {
 	}
 
 	return snapshot
+}
+
+// Summary returns aggregate playback state without exposing guild identifiers.
+func (m *Manager) Summary() Summary {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	summary := Summary{
+		KnownGuilds: len(m.players),
+	}
+	for _, player := range m.players {
+		if player.voiceChannelID != "" {
+			summary.ActiveVoiceGuilds++
+		}
+		if player.current != nil {
+			summary.PlayingGuilds++
+		}
+		summary.QueuedTracks += len(player.queue)
+	}
+
+	return summary
 }
 
 // Advance promotes the next queued track, or marks the guild idle when the queue is exhausted.

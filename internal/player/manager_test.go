@@ -98,3 +98,46 @@ func TestLeaveRemovesPlayer(t *testing.T) {
 		t.Fatalf("expected empty snapshot, got %+v", snapshot)
 	}
 }
+
+func TestSummaryEmptyManager(t *testing.T) {
+	manager := NewManager()
+
+	summary := manager.Summary()
+	if summary != (Summary{}) {
+		t.Fatalf("expected empty summary, got %+v", summary)
+	}
+}
+
+func TestSummaryAggregatesPlaybackState(t *testing.T) {
+	manager := NewManager()
+	manager.Enqueue("guild-1", "channel-1", lavalink.Track{Encoded: "first"})
+	manager.Enqueue("guild-1", "channel-1", lavalink.Track{Encoded: "second"})
+	manager.SetVoiceChannel("guild-2", "channel-2")
+
+	summary := manager.Summary()
+	if summary.KnownGuilds != 2 {
+		t.Fatalf("KnownGuilds = %d, want 2", summary.KnownGuilds)
+	}
+	if summary.ActiveVoiceGuilds != 2 {
+		t.Fatalf("ActiveVoiceGuilds = %d, want 2", summary.ActiveVoiceGuilds)
+	}
+	if summary.PlayingGuilds != 1 {
+		t.Fatalf("PlayingGuilds = %d, want 1", summary.PlayingGuilds)
+	}
+	if summary.QueuedTracks != 1 {
+		t.Fatalf("QueuedTracks = %d, want 1", summary.QueuedTracks)
+	}
+}
+
+func TestSummaryReflectsLeave(t *testing.T) {
+	manager := NewManager()
+	manager.Enqueue("guild", "channel", lavalink.Track{Encoded: "first"})
+	manager.Enqueue("guild", "channel", lavalink.Track{Encoded: "second"})
+
+	manager.Leave("guild")
+
+	summary := manager.Summary()
+	if summary != (Summary{}) {
+		t.Fatalf("expected empty summary after leave, got %+v", summary)
+	}
+}
