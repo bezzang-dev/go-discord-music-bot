@@ -66,6 +66,10 @@ LAVALINK_HOST=127.0.0.1
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=dev-lavalink-pass
 LOG_LEVEL=info
+SHARD_ID=0
+SHARD_COUNT=1
+DISCORD_COMMAND_REGISTRATION_ENABLED=true
+DISCORD_COMMAND_CLEANUP_ENABLED=true
 METRICS_ENABLED=true
 METRICS_ADDR=127.0.0.1:2112
 METRICS_LAVALINK_STATS_INTERVAL=15s
@@ -98,10 +102,26 @@ go run ./cmd/bot
 
 Expected startup logs:
 - `connected to Lavalink 4.2.2`
+- `discord gateway shard configured: shard_id=0 shard_count=1`
 - `logged in as ...`
 - `Lavalink websocket session ... is ready`
 - `metrics server is listening on 127.0.0.1:2112`
 - `bot is running. press Ctrl+C to exit.`
+
+## Sharding
+The default runtime is a single Discord Gateway shard: `SHARD_ID=0` and `SHARD_COUNT=1`.
+
+When running multiple shard processes, keep `SHARD_COUNT` identical for every process and give each process a unique `SHARD_ID` from `0` to `SHARD_COUNT - 1`.
+
+Example with three shards:
+
+```bash
+SHARD_ID=0 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=true DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2112 go run ./cmd/bot
+SHARD_ID=1 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2113 go run ./cmd/bot
+SHARD_ID=2 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2114 go run ./cmd/bot
+```
+
+Only one shard process should register slash commands. For multi-shard operation, keep command cleanup disabled so one process shutdown does not remove commands while other shards are still running.
 
 ## Observability
 The bot exposes Prometheus metrics at `http://127.0.0.1:2112/metrics` by default.

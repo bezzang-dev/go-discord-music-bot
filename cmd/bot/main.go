@@ -80,6 +80,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create discord session: %v", err)
 	}
+	session.ShardID = cfg.ShardID
+	session.ShardCount = cfg.ShardCount
+	log.Printf("discord gateway shard configured: shard_id=%d shard_count=%d", cfg.ShardID, cfg.ShardCount)
 
 	app := &bot{
 		cfg:          cfg,
@@ -164,27 +167,38 @@ func main() {
 	}
 
 	// Guild-scoped commands keep local development fast and avoid global propagation delays.
-	createdCommands := make([]*discordgo.ApplicationCommand, 0, len(commands))
-	for _, command := range commands {
-		createdCommand, err := session.ApplicationCommandCreate(
-			session.State.User.ID,
-			cfg.GuildID,
-			command,
-		)
-		if err != nil {
-			log.Fatalf("failed to register slash command %s: %v", command.Name, err)
-		}
-		createdCommands = append(createdCommands, createdCommand)
-	}
-
-	defer func() {
-		for _, command := range createdCommands {
-			err := session.ApplicationCommandDelete(session.State.User.ID, cfg.GuildID, command.ID)
+	if cfg.DiscordCommandRegistrationEnabled {
+		createdCommands := make([]*discordgo.ApplicationCommand, 0, len(commands))
+		for _, command := range commands {
+			createdCommand, err := session.ApplicationCommandCreate(
+				session.State.User.ID,
+				cfg.GuildID,
+				command,
+			)
 			if err != nil {
-				log.Printf("failed to delete slash command %s: %v", command.Name, err)
+				log.Fatalf("failed to register slash command %s: %v", command.Name, err)
 			}
+			createdCommands = append(createdCommands, createdCommand)
 		}
-	}()
+
+		if cfg.DiscordCommandCleanupEnabled {
+			defer func() {
+				for _, command := range createdCommands {
+					err := session.ApplicationCommandDelete(session.State.User.ID, cfg.GuildID, command.ID)
+					if err != nil {
+						log.Printf("failed to delete slash command %s: %v", command.Name, err)
+					}
+				}
+			}()
+		} else {
+			log.Println("slash command cleanup is disabled")
+		}
+	} else {
+		log.Println("slash command registration is disabled")
+		if cfg.DiscordCommandCleanupEnabled {
+			log.Println("slash command cleanup is skipped because registration is disabled")
+		}
+	}
 
 	log.Println("bot is running. press Ctrl+C to exit.")
 

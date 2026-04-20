@@ -351,6 +351,11 @@ Discord User
 - 영속성이 없다.
 - 프로세스 재시작 시 상태 복구가 없다.
 
+기본 Gateway 실행 모델은 단일 shard이다.
+환경 변수를 생략하면 `SHARD_ID=0`, `SHARD_COUNT=1`로 동작한다.
+여러 shard 프로세스를 실행하면 Discord guild 이벤트는 shard별로 분산되지만, 큐와 현재 곡 상태는 여전히 각 shard 프로세스의 메모리에만 저장된다.
+따라서 shard 재시작 후 큐 복구나 다른 shard로의 상태 승계는 아직 제공하지 않는다.
+
 ## 실행 방법
 기본 실행 절차는 아래와 같다.
 
@@ -364,6 +369,10 @@ LAVALINK_HOST=127.0.0.1
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=dev-lavalink-pass
 LOG_LEVEL=info
+SHARD_ID=0
+SHARD_COUNT=1
+DISCORD_COMMAND_REGISTRATION_ENABLED=true
+DISCORD_COMMAND_CLEANUP_ENABLED=true
 ```
 
 ### 2. Lavalink 실행
@@ -392,9 +401,20 @@ go run ./cmd/bot
 
 정상 로그 예시:
 - `connected to Lavalink 4.2.2`
+- `discord gateway shard configured: shard_id=0 shard_count=1`
 - `logged in as ...`
 - `Lavalink websocket session ... is ready`
 - `bot is running. press Ctrl+C to exit.`
+
+### 4. 여러 shard로 실행
+`SHARD_COUNT`는 모든 프로세스에서 같은 값이어야 하고, `SHARD_ID`는 `0`부터 `SHARD_COUNT - 1`까지 프로세스마다 다르게 둔다.
+slash command 등록은 한 프로세스에서만 켜고, 다중 shard 운영에서는 종료 시 command 삭제를 끈다.
+
+```bash
+SHARD_ID=0 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=true DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2112 go run ./cmd/bot
+SHARD_ID=1 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2113 go run ./cmd/bot
+SHARD_ID=2 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2114 go run ./cmd/bot
+```
 
 ## 수동 검증 절차
 현재 구현 상태를 확인하려면 Discord 서버에서 아래 순서로 테스트하면 된다.
@@ -428,6 +448,7 @@ go run ./cmd/bot
 - `/nowplaying`
 - `/leave`
 - 길드별 메모리 큐
+- 설정 가능한 Discord Gateway shard
 - 트랙 종료 시 자동 다음 곡 재생
 
 아직 없는 것:
@@ -436,7 +457,7 @@ go run ./cmd/bot
 - 영속 저장소
 - 운영용 모니터링
 - 다중 노드 Lavalink 전략
-- 대규모 공개 배포용 샤딩
+- shard startup coordinator와 대규모 공개 배포용 자동 샤딩 전략
 
 ## 운영 시 주의사항
 ### Lavalink가 먼저 떠 있어야 한다
@@ -448,6 +469,10 @@ go run ./cmd/bot
 
 ### 현재 큐는 메모리 기반이다
 봇이 재시작되면 현재 곡과 대기열 정보는 사라진다.
+
+### 다중 shard에서는 command 등록을 한 프로세스만 수행한다
+`DISCORD_COMMAND_REGISTRATION_ENABLED=true`는 한 프로세스에만 설정한다.
+다중 shard 운영에서는 `DISCORD_COMMAND_CLEANUP_ENABLED=false`로 두어 한 shard 종료가 slash command를 삭제하지 않게 한다.
 
 ### 같은 길드에서 다른 음성 채널로 동시에 사용하지 않는다
 현재 구현은 길드별 단일 활성 음성 채널을 기준으로 동작한다.

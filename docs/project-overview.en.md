@@ -353,6 +353,11 @@ Limits of this approach:
 - no persistence
 - no state recovery after process restart
 
+The default Gateway runtime model is a single shard.
+When shard environment variables are omitted, the bot runs as `SHARD_ID=0` and `SHARD_COUNT=1`.
+When multiple shard processes run, Discord guild events are distributed across shards, but the queue and current track state are still stored only in each shard process memory.
+Queue recovery after shard restart and state handoff to another shard are not provided yet.
+
 ## How To Run
 The default run procedure is below.
 
@@ -366,6 +371,10 @@ LAVALINK_HOST=127.0.0.1
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=dev-lavalink-pass
 LOG_LEVEL=info
+SHARD_ID=0
+SHARD_COUNT=1
+DISCORD_COMMAND_REGISTRATION_ENABLED=true
+DISCORD_COMMAND_CLEANUP_ENABLED=true
 ```
 
 ### 2. Start Lavalink
@@ -394,9 +403,20 @@ go run ./cmd/bot
 
 Expected log examples:
 - `connected to Lavalink 4.2.2`
+- `discord gateway shard configured: shard_id=0 shard_count=1`
 - `logged in as ...`
 - `Lavalink websocket session ... is ready`
 - `bot is running. press Ctrl+C to exit.`
+
+### 4. Run multiple shards
+`SHARD_COUNT` must be the same for every process, and `SHARD_ID` must be unique per process from `0` to `SHARD_COUNT - 1`.
+Enable slash command registration in only one process, and disable command cleanup for multi-shard operation.
+
+```bash
+SHARD_ID=0 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=true DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2112 go run ./cmd/bot
+SHARD_ID=1 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2113 go run ./cmd/bot
+SHARD_ID=2 SHARD_COUNT=3 DISCORD_COMMAND_REGISTRATION_ENABLED=false DISCORD_COMMAND_CLEANUP_ENABLED=false METRICS_ADDR=127.0.0.1:2114 go run ./cmd/bot
+```
 
 ## Manual Verification Procedure
 To verify the current implementation, test in a Discord server in this order:
@@ -430,6 +450,7 @@ Implemented as of now:
 - `/nowplaying`
 - `/leave`
 - per-guild in-memory queue
+- configurable Discord Gateway shard settings
 - automatic next-track playback on track end
 
 Not implemented yet:
@@ -438,7 +459,7 @@ Not implemented yet:
 - persistent storage
 - production monitoring
 - multi-node Lavalink strategy
-- sharding for large public deployment
+- shard startup coordinator and automatic sharding strategy for large public deployment
 
 ## Operational Caveats
 ### Lavalink must start first
@@ -450,6 +471,10 @@ If `LAVALINK_PASSWORD` differs, authentication fails.
 
 ### The current queue is in-memory only
 If the bot restarts, the current track and queue are lost.
+
+### Register commands from only one process in multi-shard operation
+Set `DISCORD_COMMAND_REGISTRATION_ENABLED=true` in only one process.
+For multi-shard operation, set `DISCORD_COMMAND_CLEANUP_ENABLED=false` so one shard shutdown does not delete slash commands while other shards are still running.
 
 ### Do not use multiple voice channels in the same guild at the same time
 The current implementation assumes one active voice channel per guild.

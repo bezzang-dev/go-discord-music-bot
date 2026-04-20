@@ -7,11 +7,7 @@ import (
 )
 
 func TestLoadSuccess(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("GUILD_ID", "guild")
-	t.Setenv("LAVALINK_HOST", "127.0.0.1")
-	t.Setenv("LAVALINK_PORT", "2333")
-	t.Setenv("LAVALINK_PASSWORD", "password")
+	setRequiredEnv(t)
 	t.Setenv("LOG_LEVEL", "")
 
 	cfg, err := Load()
@@ -37,6 +33,18 @@ func TestLoadSuccess(t *testing.T) {
 	if cfg.MetricsLavalinkStatsInterval != defaultMetricsLavalinkStatsInterval {
 		t.Fatalf("unexpected metrics stats interval: %s", cfg.MetricsLavalinkStatsInterval)
 	}
+	if cfg.ShardID != defaultShardID {
+		t.Fatalf("unexpected shard ID: %d", cfg.ShardID)
+	}
+	if cfg.ShardCount != defaultShardCount {
+		t.Fatalf("unexpected shard count: %d", cfg.ShardCount)
+	}
+	if !cfg.DiscordCommandRegistrationEnabled {
+		t.Fatal("expected Discord command registration to be enabled by default")
+	}
+	if !cfg.DiscordCommandCleanupEnabled {
+		t.Fatal("expected Discord command cleanup to be enabled by default")
+	}
 }
 
 func TestLoadMissingRequiredKeys(t *testing.T) {
@@ -60,11 +68,8 @@ func TestLoadMissingRequiredKeys(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidPort(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("GUILD_ID", "guild")
-	t.Setenv("LAVALINK_HOST", "127.0.0.1")
+	setRequiredEnv(t)
 	t.Setenv("LAVALINK_PORT", "invalid")
-	t.Setenv("LAVALINK_PASSWORD", "password")
 
 	_, err := Load()
 	if err == nil {
@@ -77,11 +82,7 @@ func TestLoadRejectsInvalidPort(t *testing.T) {
 }
 
 func TestLoadAllowsMetricsDisabled(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("GUILD_ID", "guild")
-	t.Setenv("LAVALINK_HOST", "127.0.0.1")
-	t.Setenv("LAVALINK_PORT", "2333")
-	t.Setenv("LAVALINK_PASSWORD", "password")
+	setRequiredEnv(t)
 	t.Setenv("METRICS_ENABLED", "false")
 	t.Setenv("METRICS_ADDR", "127.0.0.1:2113")
 	t.Setenv("METRICS_LAVALINK_STATS_INTERVAL", "30s")
@@ -103,11 +104,7 @@ func TestLoadAllowsMetricsDisabled(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidMetricsEnabled(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("GUILD_ID", "guild")
-	t.Setenv("LAVALINK_HOST", "127.0.0.1")
-	t.Setenv("LAVALINK_PORT", "2333")
-	t.Setenv("LAVALINK_PASSWORD", "password")
+	setRequiredEnv(t)
 	t.Setenv("METRICS_ENABLED", "maybe")
 
 	_, err := Load()
@@ -120,11 +117,7 @@ func TestLoadRejectsInvalidMetricsEnabled(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidMetricsStatsInterval(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("GUILD_ID", "guild")
-	t.Setenv("LAVALINK_HOST", "127.0.0.1")
-	t.Setenv("LAVALINK_PORT", "2333")
-	t.Setenv("LAVALINK_PASSWORD", "password")
+	setRequiredEnv(t)
 	t.Setenv("METRICS_LAVALINK_STATS_INTERVAL", "never")
 
 	_, err := Load()
@@ -134,4 +127,132 @@ func TestLoadRejectsInvalidMetricsStatsInterval(t *testing.T) {
 	if !strings.Contains(err.Error(), "METRICS_LAVALINK_STATS_INTERVAL") {
 		t.Fatalf("expected metrics stats interval error, got %q", err.Error())
 	}
+}
+
+func TestLoadAllowsShardConfiguration(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SHARD_ID", "1")
+	t.Setenv("SHARD_COUNT", "4")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.ShardID != 1 {
+		t.Fatalf("unexpected shard ID: %d", cfg.ShardID)
+	}
+	if cfg.ShardCount != 4 {
+		t.Fatalf("unexpected shard count: %d", cfg.ShardCount)
+	}
+}
+
+func TestLoadRejectsInvalidShardConfiguration(t *testing.T) {
+	tests := []struct {
+		name       string
+		shardID    string
+		shardCount string
+		wantKey    string
+	}{
+		{
+			name:    "invalid shard ID",
+			shardID: "invalid",
+			wantKey: "SHARD_ID",
+		},
+		{
+			name:    "negative shard ID",
+			shardID: "-1",
+			wantKey: "SHARD_ID",
+		},
+		{
+			name:       "invalid shard count",
+			shardCount: "invalid",
+			wantKey:    "SHARD_COUNT",
+		},
+		{
+			name:       "non-positive shard count",
+			shardCount: "0",
+			wantKey:    "SHARD_COUNT",
+		},
+		{
+			name:       "shard ID equals shard count",
+			shardID:    "2",
+			shardCount: "2",
+			wantKey:    "SHARD_ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tt.shardID != "" {
+				t.Setenv("SHARD_ID", tt.shardID)
+			}
+			if tt.shardCount != "" {
+				t.Setenv("SHARD_COUNT", tt.shardCount)
+			}
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Fatalf("expected %s error, got %q", tt.wantKey, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadAllowsCommandRegistrationDisabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DISCORD_COMMAND_REGISTRATION_ENABLED", "false")
+	t.Setenv("DISCORD_COMMAND_CLEANUP_ENABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.DiscordCommandRegistrationEnabled {
+		t.Fatal("expected Discord command registration to be disabled")
+	}
+	if cfg.DiscordCommandCleanupEnabled {
+		t.Fatal("expected Discord command cleanup to be disabled")
+	}
+}
+
+func TestLoadRejectsInvalidCommandRegistrationEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DISCORD_COMMAND_REGISTRATION_ENABLED", "maybe")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "DISCORD_COMMAND_REGISTRATION_ENABLED") {
+		t.Fatalf("expected command registration error, got %q", err.Error())
+	}
+}
+
+func TestLoadRejectsInvalidCommandCleanupEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DISCORD_COMMAND_CLEANUP_ENABLED", "maybe")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "DISCORD_COMMAND_CLEANUP_ENABLED") {
+		t.Fatalf("expected command cleanup error, got %q", err.Error())
+	}
+}
+
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("GUILD_ID", "guild")
+	t.Setenv("LAVALINK_HOST", "127.0.0.1")
+	t.Setenv("LAVALINK_PORT", "2333")
+	t.Setenv("LAVALINK_PASSWORD", "password")
 }
